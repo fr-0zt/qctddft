@@ -162,7 +162,7 @@ def identify_regions(
     regs = sorted(regs, key=lambda r: r.peak_energy)
 
     return regs, {"x": x, "y": y, "d2y": d2y, "boundary_idx": np.array(bidx, int)}
-
+"""
 def plot_regions(
     energies: np.ndarray,
     intensities: np.ndarray,
@@ -203,3 +203,4 @@ def plot_regions(
         plt.title("Second derivative with region edges")
         if save_path_d2: plt.savefig(save_path_d2, dpi=200, bbox_inches="tight")
         plt.show()
+"""

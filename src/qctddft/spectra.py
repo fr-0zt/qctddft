@@ -3,8 +3,10 @@ import numpy as np
 import pandas as pd
 from typing import Tuple
 from . import logger
+from .plots import plot_spectrum
 
 def _gaussian(x, e_i, f_wi, sigma_i):
+    """Calculates the Gaussian function for a single transition."""
     alpha = 2.0 * np.sqrt(np.log(2.0)) / sigma_i
     factor = 2.0 * np.sqrt(np.log(2.0) / np.pi) * (f_wi / sigma_i)
     return factor * np.exp(-(alpha * (x - e_i)) ** 2)
@@ -18,12 +20,28 @@ def build_normalized_spectrum(
     fmin_snapshot: float = 0.10,
     fmin_state: float = 0.0,
     states: str = "all",
+    save_plot: bool = False,
+    output_path: str | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Use ONLY snapshots whose FIRST state meets (E1>0 & f1>=fmin_snapshot).
-    For those snapshots, include ALL states or only FIRST. Normalize by #qual snapshots.
+    Builds a normalized, broadened spectrum from the extracted TDDFT data.
+
+    Args:
+        extracted_tsv: Path to the tab-separated file with the extracted data.
+        sigma: The broadening factor (FWHM) for the Gaussian functions.
+        emin: The minimum energy for the spectrum.
+        emax: The maximum energy for the spectrum.
+        npts: The number of points in the spectrum.
+        fmin_snapshot: The oscillator strength threshold for the first state.
+        fmin_state: The oscillator strength threshold for individual states.
+        states: Whether to use 'all' states or only the 'first'.
+        save_plot: If True, generates and saves a plot of the spectrum.
+        output_path: The base path for the output files.
+
+    Returns:
+        A tuple containing the energy and intensity arrays of the spectrum.
     """
-    df = pd.read_csv(extracted_tsv, sep="\t")
+    df = pd.read_csv(extracted_csv, sep=",")
     energy_cols = [c for c in df.columns if c.startswith("Energy ")]
     strength_cols = [c for c in df.columns if c.startswith("Strength ")]
     if not energy_cols or not strength_cols:
@@ -62,6 +80,11 @@ def build_normalized_spectrum(
     for ei, fi, si in zip(e, f, sig):
         spec += _gaussian(x, ei, fi, si)
     spec /= float(n_qual)
+    
+    if save_plot and output_path:
+        plot_path = output_path.replace(".csv", ".png")
+        plot_spectrum(x, spec, save_path=plot_path)
+
     return x, spec
 
 def write_spectrum_csv(out_csv: str, x: np.ndarray, y: np.ndarray) -> None:

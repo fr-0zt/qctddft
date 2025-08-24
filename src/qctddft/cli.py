@@ -3,12 +3,15 @@ import sys
 import typer
 import pandas as pd
 from typing import Optional
+from pathlib import Path
 from . import logger, __version__
 from .extract import extract_directory
-from .spectra import build_normalized_spectrum, write_spectrum_csv  # keep spectra CLI working
+from .spectra import build_normalized_spectrum
+from .io import write_spectrum_csv
 from .regions import identify_regions, plot_regions
 
 App = typer.Typer(add_completion=False, no_args_is_help=True)
+
 env_opt = typer.Option(
     "auto",
     help="Environment: 'efp' (use polarization-corrected pass), 'pcm'/'vac' (first pass), or 'auto'.",
@@ -67,24 +70,31 @@ def extract_cmd(
 # ------------------ spectrum ------------------
 @App.command("spectrum")
 def spectrum_cmd(
-    extracted_tsv: str = typer.Argument(..., help="TSV from 'extract' with Energy*/Strength*"),
-    out_csv: str = typer.Option(None, "--out", help="Output CSV for spectrum"),
-    sigma: float = typer.Option(0.04, "--sigma", help="Gaussian FWHM (eV)"),
+    extracted_csv: str = typer.Argument(..., help="CSV from 'extract' with Energy*/Strength*"),
+    output_csv: str = typer.Option(None, "--out", help="Output path for the spectrum CSV file."),
+    sigma: float = typer.Option(0.04, "--sigma", help="Gaussian FWHM in eV."),
     emin: float = typer.Option(1.7, "--emin"),
     emax: float = typer.Option(2.4, "--emax"),
     npts: int = typer.Option(1000, "--npts"),
     fmin_snapshot: float = typer.Option(0.10, "--fmin-snapshot", help="Filter by FIRST state (E1>0 & f1>=)"),
     fmin_state: float = typer.Option(0.0, "--fmin-state", help="Per-state f filter after snapshot filter"),
     states: str = typer.Option("all", "--states", help="Use 'all' states or 'first' only"),
+    save_plot: bool = typer.Option(False, "--save-plot", help="Generate and save a plot of the spectrum."),
 ):
+    """
+    Generates a convoluted spectrum from the extracted TDDFT data.
+    """
+    out_path = output_csv or (str(Path(extracted_tsv).with_suffix("")) + "_spectrum-norm.csv")
+
     x, y = build_normalized_spectrum(
-        extracted_tsv,
+        extracted_csv,
         sigma=sigma, emin=emin, emax=emax, npts=npts,
         fmin_snapshot=fmin_snapshot, fmin_state=fmin_state, states=states,
+        save_plot=save_plot,
+        output_path=out_path,
     )
-    out = out_csv or (str(Path(extracted_tsv).with_suffix("")) + "_spectrum-norm.csv")
-    write_spectrum_csv(out, x, y)
-    typer.echo(f"[OK] Wrote spectrum -> {out}")
+    write_spectrum_csv(out_path, x, y)
+    typer.echo(f"[OK] Wrote spectrum to {out_path}")
 
 # ------------------ regions ------------------
 @App.command("regions")
