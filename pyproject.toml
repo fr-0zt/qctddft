@@ -4,22 +4,36 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qctddft"
-version = "0.1.0"
-description = "Processing utilities for Q-Chem TDDFT (EFP/PCM/vacuum), spectra & region analysis"
+version = "1.0.0"
+description = "Q-Chem TDDFT extraction, spectra, and region analysis"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Senal Liyanage" }]
 dependencies = [
-    "numpy>=1.23",
-    "pandas>=2.0",
-    "typer>=0.9",
-    "rich>=13.0",
+  "typer>=0.9",
+  "pandas>=2.0",
+  "numpy>=1.23",
+  "matplotlib>=3.7",
+  "scipy>=1.10",  # keep if any module uses scipy.special.erf
 ]
-
-[project.optional-dependencies]
-plot = ["matplotlib>=3.7"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Intended Audience :: Science/Research"
+]
 
 [project.scripts]
 qctddft = "qctddft.cli:run"
+
+[project.urls]
+Homepage = "https://github.com/fr-0zt/"
+Repository = "https://github.com/fr-0zt/qctddft/"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["qctddft*"]
 
 [tool.black]
 line-length = 100
@@ -28,4 +42,15 @@ line-length = 100
 line-length = 100
 select = ["E","F","I","UP"]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "black>=23",
+  "ruff>=0.4",
+  "build>=1.0",
+  "twine>=4.0",
+]
 
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["src"]

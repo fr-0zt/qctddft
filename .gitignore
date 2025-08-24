@@ -1,24 +1,89 @@
-# Python
+# --- Python standard ignores ---
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
 .eggs/
-
-# Virtual envs
-.venv/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+*.mo
+*.pot
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy
+docs/_build/
+.pybuilder/
+target/
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+__pypackages__/
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+.env
+.venv
 env/
 venv/
+ENV/
+env.bak/
+venv.bak/
+.spyderproject
+.spyproject
+.ropeproject
+/site
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
 
-# Jupyter checkpoints
-.ipynb_checkpoints/
+# --- Project-specific ignores ---
+# Large Q-Chem outputs and generated data
+*.out
+*.dat
+*.csv
+*.pdb
+*.xyz
 
-# VSCode / PyCharm
-.vscode/
-.idea/
+# Keep only small fixtures under version control
+src/tests/
 
-# OS
-.DS_Store
-Thumbs.db
-
+# Test cache
+src/tests/__pycache__/

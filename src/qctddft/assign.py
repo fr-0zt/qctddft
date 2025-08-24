@@ -1,93 +1,161 @@
 from __future__ import annotations
+import math
+from pathlib import Path
+from typing import Dict, List, Literal
+
 import numpy as np
 import pandas as pd
-from math import erf, sqrt, log
-from typing import Tuple, List
 from .regions import Region
+from . import logger
 
-def _gauss_region_weight(E: np.ndarray, sigma: float, L: float, R: float) -> np.ndarray:
-    # integral of normalized Gaussian over [L,R] (FWHM=sigma)
-    alpha = 2.0*sqrt(log(2.0))/max(1e-12, sigma)
-    return 0.5*(erf(alpha*(R - E)) - erf(alpha*(L - E)))
+def _gauss_region_weight(Ei: np.ndarray, fwhm: float, L: float, R: float) -> np.ndarray:
+    """
+    Analytic fractional weight of each state at energy Ei within region [L, R]
+    for a Gaussian with FWHM=fwhm. Using alpha = sqrt(4 ln2) / fwhm.
+    Weight = 0.5 * [erf(alpha*(R-Ei)) - erf(alpha*(L-Ei))]
+    """
+    alpha = math.sqrt(4.0 * math.log(2.0)) / max(1e-12, fwhm)
+    # vectorized with python's math.erf via numpy.frompyfunc for stability
+    def _erf(v: float) -> float: return math.erf(v)
+    uerf = np.frompyfunc(_erf, 1, 1)
+    return 0.5 * (uerf(alpha * (R - Ei)).astype(float) - uerf(alpha * (L - Ei)).astype(float))
 
 def assign_states_to_regions(
     df: pd.DataFrame,
-    energy_cols: list[str],
-    strength_cols: list[str],
+    energy_cols: List[str],
+    strength_cols: List[str],
     config_col: str,
     regions: List[Region],
-    *,
-    which_states: str = "first",  # "first" or "all"
-    qualify_f1: float = 0.1,
-    fmin_state: float = 0.0,
     sigma: float = 0.04,
-    fractional: bool = True,
-):
-    """Return (assignment_df, summary_df) with configuration preserved."""
-    E = df[energy_cols].to_numpy(float)
-    F = df[strength_cols].to_numpy(float)
-    cfg = df[config_col].to_numpy()
+    states_mode: Literal["first", "all"] = "first",
+    fractional: bool = False,
+    save: bool = True,
+    list_excluded: bool = False,
+    table_path: str | None = None,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Assign snapshots/states to regions using hard or fractional rules.
 
-    qualify = (E[:, 0] > 0.0) & (F[:, 0] >= qualify_f1)
-    if which_states == "first":
-        E_use = E[qualify, [0]]
-        F_use = F[qualify, [0]]
-        cfg_use = cfg[qualify]
-    else:
-        E_use = E[qualify]
-        F_use = F[qualify]
-        cfg_use = np.repeat(cfg[qualify], E_use.shape[1])
+    - Hard: a state belongs to the single region whose span [L,R] contains Ei (ties → left).
+    - Fractional: a state contributes to all regions with Gaussian overlap weight.
 
-    E_flat = E_use.ravel()
-    F_flat = F_use.ravel()
-    cfg_flat = cfg_use
+    Outputs
+    -------
+    - state_assignment.csv
+    - region_summary.csv
+    """
+    cfg = df[config_col].to_numpy(int)
+    E = df[energy_cols].to_numpy(float)          # shape (N, S)
+    F = df[strength_cols].to_numpy(float)        # shape (N, S)
 
-    keep = F_flat >= fmin_state
-    E_flat, F_flat, cfg_flat = E_flat[keep], F_flat[keep], cfg_flat[keep]
+    if states_mode == "first":
+        E = E[:, :1]
+        F = F[:, :1]
 
-    L = np.array([r.left_energy for r in regions])
-    R = np.array([r.right_energy for r in regions])
-    J = len(regions)
+    N, S = E.shape
+    Rn = len(regions)
+
+    # Build weights W of shape (N*S, R)
+    Ei = E.reshape(-1)
+    fi = F.reshape(-1)
+
+    # build region span arrays
+    span_L = np.array([r.left_energy for r in regions], dtype=float)
+    span_R = np.array([r.right_energy for r in regions], dtype=float)
 
     if fractional:
-        W = np.vstack([_gauss_region_weight(E_flat, sigma, L[j], R[j]) for j in range(J)]).T
-        row_sums = W.sum(axis=1)
-        nz = row_sums > 0
-        W[nz] /= row_sums[nz, None]
+        W = np.zeros((Ei.size, Rn), dtype=float)
+        for j in range(Rn):
+            wj = _gauss_region_weight(Ei, sigma, span_L[j], span_R[j])
+            W[:, j] = np.clip(wj, 0.0, 1.0)
+        # normalize per-state so sum_j W_ij ≤ 1 (Gaussian tails outside all regions are discarded)
+        sums = W.sum(axis=1, keepdims=True)
+        nz = sums[:, 0] > 0
+        W[nz, :] = W[nz, :] / sums[nz]
     else:
-        W = np.zeros((E_flat.size, J))
-        mids = 0.5*(L+R)
-        for i, Ei in enumerate(E_flat):
-            inside = (Ei >= L) & (Ei <= R)
-            if inside.any():
-                j = int(np.argmin(np.abs(mids[inside] - Ei)))
-                idx = np.arange(J)[inside][j]
-                W[i, idx] = 1.0
+        # Hard assignment
+        centers = 0.5 * (span_L + span_R)
+        # choose region whose [L,R] contains Ei, else closest center
+        W = np.zeros((Ei.size, Rn), dtype=float)
+        for i, e in enumerate(Ei):
+            hits = np.where((e >= span_L) & (e <= span_R))[0]
+            if hits.size:
+                # if multiple, choose the left-most deterministically
+                j = int(hits[0])
+            else:
+                j = int(np.argmin(np.abs(centers - e)))
+            W[i, j] = 1.0
 
-    # Build assignment table
+    # rows for assignment table
     rows = []
-    for i in range(E_flat.size):
-        for j in range(J):
-            if W[i, j] > 0.0:
-                rows.append([int(cfg_flat[i]), float(E_flat[i]), float(F_flat[i]), j+1, float(W[i, j])])
-    assignment_df = pd.DataFrame(rows, columns=["Configuration","energy","strength","region","weight"])
+    for idx in range(Ei.size):
+        if fi[idx] <= 0:
+            continue
+        nnz = np.where(W[idx] > 1e-12)[0]
+        if nnz.size == 0:
+            continue
+        n = idx // S
+        s = (idx % S) + 1
+        for j in nnz:
+            w = float(W[idx, j])
+            if w <= 0:
+                continue
+            rows.append({
+                "Configuration": int(cfg[n]),
+                "state": int(s),
+                "region": int(j + 1),
+                "Ei": float(Ei[idx]),
+                "fi": float(fi[idx]),
+                "weight": w,
+                "fi_weighted": float(fi[idx] * w),
+            })
 
-    # Summary per-region
-    sums = []
-    for j, r in enumerate(regions, 1):
-        col = W[:, j-1]
-        mask = col > 0
-        eff_states = col.sum() if fractional else mask.sum()
-        uniq_cfg = len(np.unique(cfg_flat[mask])) if mask.any() else 0
-        f_sum = float((F_flat * col).sum())
-        sums.append([j, r.left_energy, r.right_energy, r.peak_energy, r.peak_intensity,
-                     float(eff_states) if fractional else int(eff_states),
-                     int(uniq_cfg), f_sum])
-    summary_df = pd.DataFrame(
-        sums,
-        columns=["region","left_e","right_e","peak_e","peak_intensity",
-                 "effective_states" if fractional else "n_states",
-                 "unique_snapshots","f_sum"]
-    )
-    return assignment_df, summary_df
+    assign_df = pd.DataFrame(rows).sort_values(["region", "Configuration", "state"]).reset_index(drop=True)
 
+    # Region summary
+    summary_rows = []
+    for j, r in enumerate(regions, start=1):
+        sub = assign_df[assign_df["region"] == j]
+        if fractional:
+            eff_states = sub["weight"].sum()
+            f_wsum = sub["fi_weighted"].sum()
+            summary_rows.append({
+                "region": j,
+                "left_e": r.left_energy,
+                "right_e": r.right_energy,
+                "peak_e": r.peak_energy,
+                "peak_intensity": r.peak_intensity,
+                "effective_states": eff_states,
+                "unique_snapshots": sub["Configuration"].nunique(),
+                "f_weighted_sum": f_wsum,
+            })
+        else:
+            summary_rows.append({
+                "region": j,
+                "left_e": r.left_energy,
+                "right_e": r.right_energy,
+                "peak_e": r.peak_energy,
+                "peak_intensity": r.peak_intensity,
+                "n_states": len(sub),
+                "unique_snapshots": sub["Configuration"].nunique(),
+                "f_sum": sub["fi"].sum(),
+            })
+    summary_df = pd.DataFrame(summary_rows)
+
+    # Save
+    if save and table_path:
+        base = Path(table_path).with_suffix("")
+        assign_csv = f"{base.name}_state_assignment.csv"
+        summary_csv = f"{base.name}_region_summary.csv"
+        assign_df.to_csv(assign_csv, index=False)
+        summary_df.to_csv(summary_csv, index=False)
+        logger.info(f"Wrote {assign_csv}")
+        logger.info(f"Wrote {summary_csv}")
+
+    # Excluded list: leave to extractor (we maintain all qualifying snapshots here)
+    if list_excluded and table_path:
+        ex_path = f"{Path(table_path).with_suffix('').name}_excluded_configurations.txt"
+        Path(ex_path).write_text("")  # placeholder; extraction already lists excluded
+        logger.info(f"Wrote excluded configuration IDs → {ex_path}")
+
+    return {"assignments": assign_df, "summary": summary_df}

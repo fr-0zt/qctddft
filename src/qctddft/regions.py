@@ -1,16 +1,7 @@
-# src/qctddft/regions.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Literal
 import numpy as np
-
-__all__ = [
-    "Region",
-    "identify_regions",
-    "plot_regions",
-]
-
-Selection = Literal["top", "centered"]  # how to keep N regions
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
 
 @dataclass(frozen=True)
 class Region:
@@ -22,7 +13,6 @@ class Region:
     peak_energy: float
     peak_intensity: float
 
-# ---------- calculus ----------
 def _gradient(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.gradient(y, x)
 
@@ -30,296 +20,186 @@ def _second_derivative(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.gradient(_gradient(x, y), x)
 
 def _local_maxima(arr: np.ndarray) -> np.ndarray:
-    if arr.size < 3:
-        return np.empty(0, dtype=int)
-    mid = (arr[1:-1] > arr[:-2]) & (arr[1:-1] > arr[2:])
-    return np.where(mid)[0] + 1
+    if arr is None or len(arr) < 3: return np.array([], dtype=int)
+    return np.where((arr[1:-1] > arr[:-2]) & (arr[1:-1] > arr[2:]))[0] + 1
 
-# ---------- boundaries ----------
-def _pick_boundary_indices(
-    d2y: np.ndarray,
-    k_min: int = 4,
-    prominence_quantile: float = 0.60,
-) -> List[int]:
-    """
-    Choose boundary candidates at local maxima of d²I/dE².
-    Keep those above a quantile threshold; ensure at least k_min by falling
-    back to the strongest maxima.
-    """
+def _pick_boundary_indices(d2y: np.ndarray, k_min: int = 2, q: float = 0.60) -> List[int]:
     cand = _local_maxima(d2y)
-    if cand.size == 0:
-        return []
-    thr = float(np.quantile(d2y[cand], np.clip(prominence_quantile, 0.05, 0.95)))
-    picks = cand[d2y[cand] >= thr]
-    if picks.size < k_min:
+    if cand.size == 0: return []
+    thr = float(np.quantile(d2y[cand], q))
+    picks = cand[d2y[cand] >= thr].tolist()
+    if len(picks) < k_min:
         order = cand[np.argsort(d2y[cand])[::-1]]
-        picks = order[:k_min]
-    return sorted(set(picks.tolist()))
+        picks = order[:k_min].tolist()
+    return sorted(set(picks))
 
-def _regions_from_boundaries_raw(
-    x: np.ndarray,
-    y: np.ndarray,
-    boundary_idx: List[int],
-    min_width_pts: int = 3,
-) -> List[Region]:
-    if len(boundary_idx) < 2:
-        l, r = 0, len(x) - 1
+def _regions_from_boundaries(x: np.ndarray, y: np.ndarray, bidx: List[int], min_pts: int = 3) -> List[Region]:
+    if len(bidx) < 2:
+        l, r = 0, len(x)-1
+        pk = int(np.argmax(y[l:r+1])) + l
+        return [Region(l, r, x[l], x[r], pk, x[pk], y[pk])]
+    b = sorted(bidx)
+    if b[0] != 0: b = [0] + b
+    if b[-1] != len(x)-1: b = b + [len(x)-1]
+    out: List[Region] = []
+    for i in range(len(b)-1):
+        l, r = b[i], b[i+1]
+        if r - l + 1 < min_pts: continue
         pk = l + int(np.argmax(y[l:r+1]))
-        return [Region(l, r, x[l], x[r], pk, x[pk], float(y[pk]))]
+        out.append(Region(l, r, x[l], x[r], pk, x[pk], y[pk]))
+    return out
 
-    b = sorted(boundary_idx)
-    if b[0] != 0:
-        b.insert(0, 0)
-    nlast = len(x) - 1
-    if b[-1] != nlast:
-        b.append(nlast)
-
-    regs: List[Region] = []
-    for i in range(len(b) - 1):
-        l, r = b[i], b[i + 1]
-        if r - l + 1 < min_width_pts:
-            continue
-        pk = l + int(np.argmax(y[l:r+1]))
-        regs.append(
-            Region(
-                left_idx=l,
-                right_idx=r,
-                left_energy=float(x[l]),
-                right_energy=float(x[r]),
-                peak_idx=pk,
-                peak_energy=float(x[pk]),
-                peak_intensity=float(y[pk]),
-            )
-        )
-    regs.sort(key=lambda R: R.peak_energy)
+def _merge_narrow_regions(regs: List[Region], min_w_e: float) -> List[Region]:
+    if not regs or min_w_e <= 0: return regs
+    regs = sorted(regs, key=lambda r: r.peak_energy)
+    def width(r: Region) -> float: return r.right_energy - r.left_energy
+    changed = True
+    while changed and len(regs) > 1:
+        changed = False
+        for i, r in enumerate(regs):
+            if width(r) < min_w_e:
+                if i == 0:
+                    a, b = regs[0], regs[1]
+                    pk = a if a.peak_intensity >= b.peak_intensity else b
+                    regs = [Region(a.left_idx, b.right_idx, a.left_energy, b.right_energy,
+                                   pk.peak_idx, pk.peak_energy, pk.peak_intensity)] + regs[2:]
+                elif i == len(regs)-1:
+                    a, b = regs[-2], regs[-1]
+                    pk = a if a.peak_intensity >= b.peak_intensity else b
+                    regs = regs[:-2] + [Region(a.left_idx, b.right_idx, a.left_energy, b.right_energy,
+                                               pk.peak_idx, pk.peak_energy, pk.peak_intensity)]
+                else:
+                    L, C, R = regs[i-1], regs[i], regs[i+1]
+                    left_m  = Region(L.left_idx, C.right_idx, L.left_energy, C.right_energy,
+                                     (L if L.peak_intensity >= C.peak_intensity else C).peak_idx,
+                                     (L if L.peak_intensity >= C.peak_intensity else C).peak_energy,
+                                     max(L.peak_intensity, C.peak_intensity))
+                    right_m = Region(C.left_idx, R.right_idx, C.left_energy, R.right_energy,
+                                     (C if C.peak_intensity >= R.peak_intensity else R).peak_idx,
+                                     (C if C.peak_intensity >= R.peak_intensity else R).peak_energy,
+                                     max(C.peak_intensity, R.peak_intensity))
+                    # prefer wider merge
+                    if (right_m.right_energy - right_m.left_energy) >= (left_m.right_energy - left_m.left_energy):
+                        regs = regs[:i] + [right_m] + regs[i+2:]
+                    else:
+                        regs = regs[:i-1] + [left_m] + regs[i+1:]
+                regs = sorted(regs, key=lambda rr: rr.peak_energy)
+                changed = True
+                break
     return regs
 
-# ---------- merging slivers (energy space) ----------
-def _merge_edge_slivers(regs: List[Region], min_width_e: float) -> List[Region]:
-    if not regs or min_width_e <= 0:
-        return regs[:]
-    out = regs[:]
-    changed = True
-    while changed and len(out) >= 2:
-        changed = False
-        # left edge
-        r0 = out[0]
-        if (r0.right_energy - r0.left_energy) < min_width_e:
-            r1 = out[1]
-            pk = r0 if r0.peak_intensity >= r1.peak_intensity else r1
-            out = [
-                Region(
-                    left_idx=r0.left_idx,
-                    right_idx=r1.right_idx,
-                    left_energy=r0.left_energy,
-                    right_energy=r1.right_energy,
-                    peak_idx=pk.peak_idx,
-                    peak_energy=pk.peak_energy,
-                    peak_intensity=pk.peak_intensity,
-                )
-            ] + out[2:]
-            changed = True
-            continue
-        # right edge
-        rn = out[-1]
-        if (rn.right_energy - rn.left_energy) < min_width_e:
-            rm = out[-2]
-            pk = rn if rn.peak_intensity >= rm.peak_intensity else rm
-            out = out[:-2] + [
-                Region(
-                    left_idx=rm.left_idx,
-                    right_idx=rn.right_idx,
-                    left_energy=rm.left_energy,
-                    right_energy=rn.right_energy,
-                    peak_idx=pk.peak_idx,
-                    peak_energy=pk.peak_energy,
-                    peak_intensity=pk.peak_intensity,
-                )
-            ]
-            changed = True
-            continue
-    return out
-
-def _merge_internal_slivers_if_weak(
-    regs: List[Region],
-    min_width_e: float,
-    weak_ratio: float = 0.65,
-) -> List[Region]:
-    if min_width_e <= 0 or not regs:
-        return regs[:]
-    out: List[Region] = []
-    i = 0
-    while i < len(regs):
-        r = regs[i]
-        width = r.right_energy - r.left_energy
-        if 0 < i < len(regs) - 1 and width < min_width_e:
-            left_pk = regs[i - 1].peak_intensity
-            right_pk = regs[i + 1].peak_intensity
-            # merge into stronger neighbor (prefer right on ties)
-            if r.peak_intensity < weak_ratio * max(left_pk, right_pk):
-                if right_pk >= left_pk:
-                    n = regs[i + 1]
-                    pk = r if r.peak_intensity >= n.peak_intensity else n
-                    out.append(
-                        Region(
-                            left_idx=r.left_idx,
-                            right_idx=n.right_idx,
-                            left_energy=r.left_energy,
-                            right_energy=n.right_energy,
-                            peak_idx=pk.peak_idx,
-                            peak_energy=pk.peak_energy,
-                            peak_intensity=pk.peak_intensity,
-                        )
-                    )
-                    i += 2
-                    continue
-                else:
-                    p = out.pop() if out else regs[i - 1]
-                    pk = r if r.peak_intensity >= p.peak_intensity else p
-                    out.append(
-                        Region(
-                            left_idx=p.left_idx,
-                            right_idx=r.right_idx,
-                            left_energy=p.left_energy,
-                            right_energy=r.right_energy,
-                            peak_idx=pk.peak_idx,
-                            peak_energy=pk.peak_energy,
-                            peak_intensity=pk.peak_intensity,
-                        )
-                    )
-                    i += 1
-                    continue
-        out.append(r)
-        i += 1
-    out.sort(key=lambda R: R.peak_energy)
-    return out
-
-# ---------- selection of N ----------
-def _select_top_n(regs: List[Region], n: int) -> List[Region]:
-    regs = sorted(regs, key=lambda r: r.peak_intensity, reverse=True)[:n]
-    return sorted(regs, key=lambda r: r.peak_energy)
-
 def _select_centered_n(regs: List[Region], n: int) -> List[Region]:
-    if len(regs) <= n:
-        return regs[:]
-    regs_sorted = sorted(regs, key=lambda r: r.peak_energy)
-    kmax = int(np.argmax([r.peak_intensity for r in regs_sorted]))
-    picks = {kmax}
-    L, R = kmax - 1, kmax + 1
-    while len(picks) < n and (L >= 0 or R < len(regs_sorted)):
-        if L >= 0:
-            picks.add(L)
-            L -= 1
-            if len(picks) == n:
-                break
-        if R < len(regs_sorted):
-            picks.add(R)
-            R += 1
-    return [regs_sorted[i] for i in sorted(picks)]
+    regs = sorted(regs, key=lambda r: r.peak_energy)
+    if len(regs) <= n: return regs
+    k = int(np.argmax([r.peak_intensity for r in regs]))
+    picks, L, R = {k}, k-1, k+1
+    while len(picks) < n and (L >= 0 or R < len(regs)):
+        if L >= 0: picks.add(L); L -= 1
+        if len(picks) == n: break
+        if R < len(regs): picks.add(R); R += 1
+    return [regs[i] for i in sorted(picks)]
 
-# ---------- public API ----------
+def _select_top_intensity(regs: List[Region], n: int) -> List[Region]:
+    regs_sorted = sorted(regs, key=lambda r: (r.peak_intensity, r.right_energy - r.left_energy, -r.peak_energy), reverse=True)
+    picked = regs_sorted[:n]
+    return sorted(picked, key=lambda r: r.peak_energy)
+
 def identify_regions(
     energies: np.ndarray,
     intensities: np.ndarray,
     n_regions: int = 3,
-    prominence_quantile: float = 0.60,
-    min_width_e: float = 0.035,
-    selection: Selection = "top",
-    y_floor_frac: float = 0.0,
+    prom_q: float = 0.60,       # alias for prominence_quantile
+    k_min: int = 4,
+    min_width_e: float = 0.02,
+    min_width_pts: int = 3,
+    selection: str = "top",     # "top" or "centered"
+    y_floor_frac: float = 0.00,
+    band_area_q: float = 0.00,
+    **kwargs,
 ) -> Tuple[List[Region], Dict[str, np.ndarray]]:
-    """
-    Identify peak/shoulder regions using 2nd-derivative maxima as boundaries (no smoothing).
+    prominence_quantile = float(kwargs.get("prominence_quantile", prom_q))
 
-    Parameters
-    ----------
-    energies : 1D array (strictly increasing)
-    intensities : 1D array
-    n_regions : number of regions to retain
-    prominence_quantile : quantile threshold applied to local maxima of d²I/dE²
-    min_width_e : minimal allowed region width (eV) — slivers are merged
-    selection : 'top' (by intensity) or 'centered' (around the strongest peak)
-    y_floor_frac : optional baseline removal; subtract y_floor_frac * max(intensity)
-
-    Returns
-    -------
-    regions : list[Region]
-    arrays  : dict with "dy", "d2y", "boundary_idx"
-    """
     x = np.asarray(energies, float)
     y = np.asarray(intensities, float)
-    assert x.ndim == 1 and y.ndim == 1 and x.size == y.size and x.size > 5
+    assert x.ndim == y.ndim == 1 and x.size == y.size and x.size > 5
     assert np.all(np.diff(x) > 0), "energies must be strictly increasing"
 
-    if y_floor_frac > 0:
-        y = y - float(y_floor_frac) * float(np.max(y))
-        y = np.clip(y, 0.0, None)
+    # Optional trimming/tail handling
+    if y_floor_frac > 0.0:
+        ymax = float(np.max(y))
+        thr = ymax * y_floor_frac
+        mask = y >= thr
+        if np.any(mask):
+            k0 = int(np.argmax(y))
+            L = k0
+            while L > 0 and mask[L-1]: L -= 1
+            R = k0
+            while R < len(y)-1 and mask[R+1]: R += 1
+            x, y = x[L:R+1], y[L:R+1]
 
-    dy = _gradient(x, y)
+    if band_area_q > 0.0:
+        y_pos = np.clip(y, 0.0, None)
+        area = float(np.trapezoid(y_pos, x))
+        if area > 0:
+            c = np.cumsum((y_pos[1:]+y_pos[:-1]) * 0.5 * np.diff(x))
+            c = np.concatenate([[0.0], c]) / area
+            lo = float(np.clip(band_area_q, 0.0, 0.45)); hi = 1.0 - lo
+            i_lo = int(np.searchsorted(c, lo))
+            i_hi = int(np.searchsorted(c, hi))
+            i_lo = max(0, min(i_lo, len(x)-2))
+            i_hi = max(i_lo+1, min(i_hi, len(x)-1))
+            x, y = x[i_lo:i_hi+1], y[i_lo:i_hi+1]
+
+    # curvature + boundaries
     d2y = _second_derivative(x, y)
-    bidx = _pick_boundary_indices(d2y, k_min=4, prominence_quantile=prominence_quantile)
+    bidx = _pick_boundary_indices(d2y, k_min=max(2, int(k_min)), q=prominence_quantile)
 
-    regs = _regions_from_boundaries_raw(x, y, bidx, min_width_pts=3)
-    if not regs:
-        return [], {"dy": dy, "d2y": d2y, "boundary_idx": np.array(bidx, int)}
+    regs = _regions_from_boundaries(x, y, bidx, min_pts=min_width_pts)
+    regs = _merge_narrow_regions(regs, min_width_e)
 
-    # merge slivers (edge first, then internal if weak)
-    regs = _merge_edge_slivers(regs, min_width_e)
-    regs = _merge_internal_slivers_if_weak(regs, min_width_e, weak_ratio=0.65)
-
-    # keep N
     if len(regs) > n_regions:
-        regs = _select_top_n(regs, n_regions) if selection == "top" else _select_centered_n(regs, n_regions)
+        regs = _select_top_intensity(regs, n_regions) if selection == "top" else _select_centered_n(regs)
+    regs = sorted(regs, key=lambda r: r.peak_energy)
 
-    regs.sort(key=lambda r: r.peak_energy)
-    return regs, {"dy": dy, "d2y": d2y, "boundary_idx": np.array(bidx, int)}
+    return regs, {"x": x, "y": y, "d2y": d2y, "boundary_idx": np.array(bidx, int)}
 
-# ---------- plotting ----------
 def plot_regions(
     energies: np.ndarray,
     intensities: np.ndarray,
     regions: List[Region],
     arrays: Dict[str, np.ndarray],
     show_d2: bool = True,
-    show_only_used_boundaries: bool = True,
-    title: str = "Convoluted spectrum with regions (2nd-derivative boundaries)",
-) -> None:
-    try:
-        import matplotlib.pyplot as plt
-    except Exception as exc:
-        raise RuntimeError("matplotlib is required for plotting; install qctddft[plot]") from exc
-
-    x = np.asarray(energies, float)
-    y = np.asarray(intensities, float)
+    save_path_spectrum: Optional[str] = None,
+    save_path_d2: Optional[str] = None,
+):
+    import matplotlib.pyplot as plt
+    x = np.asarray(arrays.get("x", energies), float)
+    y = np.asarray(arrays.get("y", intensities), float)
     d2y = arrays.get("d2y")
-    all_bidx = np.asarray(arrays.get("boundary_idx", []), int)
 
-    # draw only region edges (avoid faint extra lines)
-    if show_only_used_boundaries and regions:
-        used = [regions[0].left_idx] + [r.left_idx for r in regions[1:]] + [regions[-1].right_idx]
-        bidx = np.array(sorted(set(used)), int)
+    if regions:
+        edges = [regions[0].left_energy] + [r.left_energy for r in regions[1:]] + [regions[-1].right_energy]
     else:
-        bidx = all_bidx
+        edges = []
 
-    # Figure 1: spectrum
     plt.figure()
     plt.plot(x, y, lw=1.2)
     for r in regions:
         plt.axvspan(r.left_energy, r.right_energy, alpha=0.15)
-        plt.axvline(x[r.peak_idx], linestyle="--", alpha=0.7)
-    for i in bidx:
-        plt.axvline(x[i], alpha=0.3)
-    plt.xlabel("Energy (eV)")
-    plt.ylabel("Intensity (arb. u.)")
-    plt.title(title)
+        plt.axvline(r.peak_energy, linestyle="--", alpha=0.8)
+    for xv in edges:
+        plt.axvline(xv, alpha=0.35)
+    plt.xlabel("Energy (eV)"); plt.ylabel("Intensity (arb. u.)")
+    plt.title("Convoluted spectrum with regions")
+    if save_path_spectrum: plt.savefig(save_path_spectrum, dpi=200, bbox_inches="tight")
     plt.show()
 
-    # Figure 2: d²I/dE²
     if show_d2 and d2y is not None:
         plt.figure()
         plt.plot(x, d2y, lw=1.0)
-        for i in bidx:
-            plt.axvline(x[i], alpha=0.3)
-        plt.xlabel("Energy (eV)")
-        plt.ylabel("d²I/dE² (arb. u.)")
-        plt.title("Second derivative with boundary maxima")
+        for xv in edges:
+            plt.axvline(xv, alpha=0.35)
+        plt.xlabel("Energy (eV)"); plt.ylabel("d²I/dE² (arb. u.)")
+        plt.title("Second derivative with region edges")
+        if save_path_d2: plt.savefig(save_path_d2, dpi=200, bbox_inches="tight")
         plt.show()

@@ -2,51 +2,67 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Tuple
+from . import logger
 
-# --- Gaussian lineshape (FWHM=sigma) ---
-def gaussian(x, e_i, f_wi, sigma_i):
-    factor = 2 * np.sqrt(np.log(2) / np.pi) * (f_wi / sigma_i)
-    exponent = -((2 * (x - e_i) * np.sqrt(np.log(2)) / sigma_i) ** 2)
-    return factor * np.exp(exponent)
-
-def build_spectrum(energies: np.ndarray, strengths: np.ndarray, sigmas: np.ndarray, x: np.ndarray) -> np.ndarray:
-    y = np.zeros_like(x, dtype=float)
-    for e, f, s in zip(energies, strengths, sigmas):
-        if f <= 0.0:
-            continue
-        y += gaussian(x, e, f, s)
-    return y
+def _gaussian(x, e_i, f_wi, sigma_i):
+    alpha = 2.0 * np.sqrt(np.log(2.0)) / sigma_i
+    factor = 2.0 * np.sqrt(np.log(2.0) / np.pi) * (f_wi / sigma_i)
+    return factor * np.exp(-(alpha * (x - e_i)) ** 2)
 
 def build_normalized_spectrum(
-    df: pd.DataFrame,
-    energy_cols: list[str],
-    strength_cols: list[str],
-    x: np.ndarray,
+    extracted_tsv: str,
     sigma: float = 0.04,
-    qualify_f1: float = 0.1,
+    emin: float = 1.7,
+    emax: float = 2.4,
+    npts: int = 1000,
+    fmin_snapshot: float = 0.10,
     fmin_state: float = 0.0,
-) -> tuple[np.ndarray, int, int]:
+    states: str = "all",
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Normalize by count of qualified snapshots: (E1>0 & f1 >= qualify_f1).
-    Then include all states with strength >= fmin_state.
-    Returns (y_norm, n_qualified_snapshots, n_states_used).
+    Use ONLY snapshots whose FIRST state meets (E1>0 & f1>=fmin_snapshot).
+    For those snapshots, include ALL states or only FIRST. Normalize by #qual snapshots.
     """
+    df = pd.read_csv(extracted_tsv, sep="\t")
+    energy_cols = [c for c in df.columns if c.startswith("Energy ")]
+    strength_cols = [c for c in df.columns if c.startswith("Strength ")]
+    if not energy_cols or not strength_cols:
+        raise ValueError("Input must have Energy*/Strength* columns (tab-separated).")
+
+    energy_cols.sort(key=lambda s: int(s.split()[-1]))
+    strength_cols.sort(key=lambda s: int(s.split()[-1]))
+
     E = df[energy_cols].to_numpy(float)
     F = df[strength_cols].to_numpy(float)
 
-    qual = (E[:, 0] > 0.0) & (F[:, 0] >= qualify_f1)
-    n_qual = int(qual.sum())
+    mask = (E[:, 0] > 0.0) & (F[:, 0] >= fmin_snapshot)
+    if not np.any(mask):
+        raise RuntimeError("No snapshots qualify under the first-state rule.")
+    E = E[mask]; F = F[mask]
+    n_qual = int(mask.sum())
+    logger.info("Qualifying snapshots: %d", n_qual)
 
-    mask_states = F >= fmin_state
-    E_use = E[qual][mask_states[qual]]
-    F_use = F[qual][mask_states[qual]]
+    if states == "first":
+        e = E[:, 0]
+        f = F[:, 0]
+    else:
+        e = E.ravel()
+        f = F.ravel()
 
-    energies = E_use.ravel()
-    strengths = F_use.ravel()
-    sigmas = np.full_like(energies, sigma)
-    y = build_spectrum(energies, strengths, sigmas, x)
+    if fmin_state > 0.0:
+        keep = f >= fmin_state
+        e, f = e[keep], f[keep]
 
-    if n_qual > 0:
-        y /= float(n_qual)
-    return y, n_qual, int(energies.size)
+    keep = (e > 0.0) & np.isfinite(e) & np.isfinite(f)
+    e, f = e[keep], f[keep]
 
+    x = np.linspace(emin, emax, npts)
+    spec = np.zeros_like(x, dtype=float)
+    sig = np.full_like(e, sigma, dtype=float)
+    for ei, fi, si in zip(e, f, sig):
+        spec += _gaussian(x, ei, fi, si)
+    spec /= float(n_qual)
+    return x, spec
+
+def write_spectrum_csv(out_csv: str, x: np.ndarray, y: np.ndarray) -> None:
+    pd.DataFrame({"Energy (eV)": x, "Intensity": y}).to_csv(out_csv, index=False)

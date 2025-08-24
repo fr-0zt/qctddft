@@ -1,215 +1,201 @@
 from __future__ import annotations
-import re, os, glob
-from dataclasses import dataclass
-from typing import List, Tuple, Optional, Literal
+import re
+import os
+import glob
+from typing import Iterable, List, Tuple, Optional
 import pandas as pd
 
-Env = Literal["efp", "pcm", "vacuum", "auto"]
+# We don’t import the package logger at import time to keep this file usable standalone.
+try:
+    from . import logger
+except Exception:  # pragma: no cover
+    import logging
+    logger = logging.getLogger("qctddft")
+    if not logger.handlers:
+        _h = logging.StreamHandler()
+        _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
 
-# ---------------- Patterns ----------------
-HDR_TDDFT = re.compile(r"TDDFT\s+Excitation\s+Energies", re.IGNORECASE)
-
-# PCM/Vacuum canonical energy + inline f
-PCM_ENERGY = re.compile(
-    r"Excited\s+state\s+(\d+)\s*:\s*excitation\s+energy\s*\(eV\)\s*=\s*([-+]?\d+(?:\.\d+)?)",
-    re.IGNORECASE,
+# -----------------------------
+# Regex patterns for Q-Chem TDDFT
+# -----------------------------
+# EFP (polarization-corrected energies)
+_EFP_ENERGY_RE = re.compile(
+    r"Excitation energy with pol correction \(in eV\)\s*=\s*([-]?\d+\.\d+)"
 )
-INLINE_F = re.compile(r"\bf\s*=\s*([-+]?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?)\b")
-
-# EFP polarization-corrected energy lines
-EFP_ENERGY = re.compile(
-    r"Excitation\s+energy\s+with\s+pol\s+correction\s*\(in\s*eV\)\s*=\s*([-+]?\d+(?:\.\d+)?)",
-    re.IGNORECASE,
+# PCM/VAC (standard TD-DFT excited-state line)
+_PCM_ENERGY_RE = re.compile(
+    r"Excited state\s+\d+:\s+excitation energy \(eV\)\s*=\s*([-]?\d+\.\d+)"
 )
+# Common for both
+_STRENGTH_RE = re.compile(r"Strength\s*:\s*([0-9]+\.[0-9]+)")
 
-# Generic strength lines (often appear on the next line in some formats)
-LINE_STRENGTH = re.compile(
-    r"Strength\s*:\s*([-+]?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?)",
-    re.IGNORECASE,
-)
+# config id: prefer directory .../so3sq_<n>/..., else any so3sq_<n> in basename
+_CFG_FROM_DIR_RE = re.compile(r"(?:^|/)so3sq[_-](\d+)(?:/|$)")
+_CFG_FROM_FILE_RE = re.compile(r"so3sq[_-](\d+)")
 
-# EFP job markers to help auto-detect
-EFP_MARKERS = [
-    re.compile(r"\bEFP\b", re.IGNORECASE),
-    re.compile(r"Effective\s+Fragment\s+Potential", re.IGNORECASE),
-    re.compile(r"Polarization\s+correction", re.IGNORECASE),
-]
 
-# ---------------- Data structures ----------------
-@dataclass
-class TDDFTRecord:
-    config: int
-    energies: List[float]
-    strengths: List[float]
-
-# ---------------- Utilities ----------------
-def infer_config_id(path: str) -> int:
-    """Infer configuration ID robustly from file/dir names."""
-    # Common: .../so3sq_123/...
-    m = re.findall(r"so3sq[_\-]?(\d+)", path, flags=re.IGNORECASE)
-    if m: return int(m[-1])
-    # Fallback: last integer in the path
-    m2 = re.findall(r"(\d+)", path)
-    return int(m2[-1]) if m2 else -1
-
-def first_state_passes(e: List[float], f: List[float], f1_min: float) -> bool:
-    return bool(e) and bool(f) and (e[0] > 0.0) and (f[0] >= f1_min)
-
-def _looks_like_efp(text: str) -> bool:
-    if EFP_ENERGY.search(text):  # strongest signal
-        return True
-    return any(p.search(text) for p in EFP_MARKERS)
-
-# ---------------- Core parsing ----------------
-def parse_qchem_tddft(path: str, max_states: int, env: Env) -> Optional[Tuple[List[float], List[float]]]:
+def _extract_config_id(path: str) -> Optional[int]:
     """
-    Parse a single Q-Chem TDDFT output for up to `max_states` states.
-
-    Modes:
-      - 'efp'   : read ONLY polarization-corrected energies (EFP)
-      - 'pcm'   : read ONLY canonical 'Excited state ... excitation energy (eV) = ...'
-      - 'vacuum': same as 'pcm'
-      - 'auto'  : detect from file text; prefer EFP if pol-corrected energies are present
-
-    Returns (energies, strengths) or None if nothing found.
+    Resolve configuration number from a Q-Chem TDDFT output path.
+    Works for both:
+      - TDDFT/TDDFT_EFP/so3sq_99/so3sq-water_..._99_tddft.out
+      - TDDFT/TDDFT_PCM/so3sq_1/so3sq_1_tddft.out
     """
-    try:
-        with open(path, "r", errors="ignore") as fh:
-            text = fh.read()
-    except OSError:
-        return None
+    m = _CFG_FROM_DIR_RE.search(path)
+    if m:
+        return int(m.group(1))
+    m = _CFG_FROM_FILE_RE.search(os.path.basename(path))
+    if m:
+        return int(m.group(1))
+    return None
 
-    effective_env: Env = env
-    if env == "auto":
-        effective_env = "efp" if _looks_like_efp(text) else "pcm"
 
-    # Work only within the TDDFT section to avoid matching spurious lines elsewhere.
-    sect = HDR_TDDFT.split(text, maxsplit=1)
-    if len(sect) < 2:
-        return None
-    body = sect[1]
-
-    energies_map: dict[int, float] = {}
-    strengths_map: dict[int, float] = {}
-
-    if effective_env == "efp":
-        # EFP: states are implied by order of pol-corrected lines (no explicit indices)
-        e_lines = EFP_ENERGY.findall(body)
-        # Some outputs print strengths near-by; use a one-pass scan to align strengths to energies.
-        # Strategy: collect energies in order; then walk line-by-line and assign strengths to the first state without f.
-        if not e_lines:
-            return None
-        e_vals: List[float] = [float(v) for v in e_lines[:max_states]]
-        # Now assign strengths
-        strengths: List[float] = [0.0] * len(e_vals)
-        # line-by-line pass to fill f in order encountered
-        pending = 0
-        for line in body.splitlines():
-            if EFP_ENERGY.search(line):
-                # every time we hit an energy line, we allow the next Strength line to attach
-                continue
-            ms = LINE_STRENGTH.search(line)
-            if ms and pending < len(strengths):
-                try:
-                    strengths[pending] = float(ms.group(1))
-                except ValueError:
-                    pass
-                pending += 1
-                if pending >= len(strengths):
-                    break
-        energies = e_vals + [0.0] * max(0, max_states - len(e_vals))
-        strengths = strengths + [0.0] * max(0, max_states - len(strengths))
-        return energies[:max_states], strengths[:max_states]
-
-    else:
-        # PCM/Vacuum canonical lines with explicit state index
-        # We also capture inline f on the same line, then fill any missing f from 'Strength:' lines that follow.
-        energies_map.clear(); strengths_map.clear()
-        for line in body.splitlines():
-            mE = PCM_ENERGY.search(line)
-            if mE:
-                st = int(mE.group(1))
-                if st <= max_states:
-                    energies_map[st] = float(mE.group(2))
-                    # inline f?
-                    mf = INLINE_F.search(line)
-                    if mf:
-                        strengths_map[st] = float(mf.group(1))
-                continue
-            ms = LINE_STRENGTH.search(line)
-            if ms:
-                # attach to lowest state that has energy but no f yet
-                open_states = sorted(k for k in energies_map if k not in strengths_map)
-                if open_states:
-                    strengths_map[open_states[0]] = float(ms.group(1))
-
-        if not energies_map:
-            return None
-        energies = [float(energies_map.get(i, 0.0)) for i in range(1, max_states+1)]
-        strengths = [float(strengths_map.get(i, 0.0)) for i in range(1, max_states+1)]
-        return energies, strengths
-
-# ---------------- Public API ----------------
-def extract_directory(
-    input_glob: str,
-    max_states: int = 5,
-    f1_min: float = 0.1,
-    env: Env = "auto",
-    strict_env: bool = False,
-) -> pd.DataFrame:
+def _parse_qchem_tddft_block(
+    lines: Iterable[str],
+    env: str,
+    max_states: int,
+) -> Tuple[List[float], List[float]]:
     """
-    Scan TDDFT outputs and produce a wide table:
-      Configuration, Energy1..N, Strength1..N
-
-    - env:
-        'efp'    → only pol-corrected energies
-        'pcm'    → only canonical TDDFT energies
-        'vacuum' → same as 'pcm'
-        'auto'   → inspect text; choose efp if pol-corrected lines present, else pcm
-    - strict_env:
-        If True, files that do not match the required pattern for the chosen env are skipped.
-        If False, they will just parse whatever is present (useful when mixed).
+    Parse the TDDFT section for either EFP or PCM/VAC.
+    Returns (energies, strengths) lists (possibly of different length; we align later).
     """
-    files = sorted(glob.glob(input_glob, recursive=True))
-    if not files:
-        raise FileNotFoundError(f"No files matched: {input_glob}")
+    energies: List[float] = []
+    strengths: List[float] = []
 
-    rows: List[dict] = []
-    for fp in files:
-        parsed = parse_qchem_tddft(fp, max_states=max_states, env=env)
-        if not parsed:
-            if strict_env:
-                continue
-            # try the other mode as a fallback when in 'auto' or non-strict
-            if env == "efp":
-                parsed = parse_qchem_tddft(fp, max_states=max_states, env="pcm")
-            elif env in ("pcm", "vacuum"):
-                parsed = parse_qchem_tddft(fp, max_states=max_states, env="efp")
-            elif env == "auto":
-                parsed = parse_qchem_tddft(fp, max_states=max_states, env="pcm")
-            if not parsed:
-                continue
-
-        e, f = parsed
-        if not first_state_passes(e, f, f1_min):
+    # Start capture after seeing the TDDFT header
+    capture = False
+    for ln in lines:
+        if "TDDFT Excitation Energies" in ln:
+            capture = True
+            continue
+        if not capture:
             continue
 
-        cfg = infer_config_id(fp)
-        row = {"Configuration": cfg}
-        for i in range(1, max_states + 1):
-            row[f"Energy{i}"] = float(e[i-1]) if i-1 < len(e) else 0.0
-            row[f"Strength{i}"] = float(f[i-1]) if i-1 < len(f) else 0.0
+        if env == "efp":
+            em = _EFP_ENERGY_RE.search(ln)
+        else:  # pcm or vac
+            em = _PCM_ENERGY_RE.search(ln)
+
+        sm = _STRENGTH_RE.search(ln)
+
+        if em:
+            energies.append(float(em.group(1)))
+        if sm:
+            strengths.append(float(sm.group(1)))
+
+        # quick exit if both hit max
+        if len(energies) >= max_states and len(strengths) >= max_states:
+            break
+
+    return energies, strengths
+
+
+def _pair_and_filter_first_state(
+    energies: List[float],
+    strengths: List[float],
+    max_states: int,
+    f1_min: float,
+) -> List[Tuple[float, float]]:
+    """
+    Zip energies & strengths (truncate to min length), apply first-state inclusion filter,
+    then return up to max_states pairs.
+    """
+    n = min(len(energies), len(strengths))
+    if n == 0:
+        return []
+
+    pairs = list(zip(energies[:n], strengths[:n]))
+    # first-state inclusion rule
+    e1, f1 = pairs[0]
+    if not (e1 > 0.0 and f1 >= f1_min):
+        return []
+    return pairs[:max_states]
+
+
+def extract_directory(
+    input_glob: str,
+    *,
+    max_states: int = 5,
+    f1_min: float = 0.10,
+    env: str = "auto",         # 'auto' | 'efp' | 'pcm' | 'vac'
+    strict_env: bool = False,  # if True, error when 'auto' can’t decide (we default pcm/vac)
+    config_min: Optional[int] = None,
+    config_max: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Scan a glob of Q-Chem TDDFT output files and produce a tidy table:
+    columns: Configuration, Energy 1..N, Strength 1..N
+
+    Parameters
+    ----------
+    input_glob : glob pattern of .out files
+    max_states : maximum states to collect
+    f1_min : first-state oscillator strength threshold (E1>0 & f1>=f1_min)
+    env : 'efp' uses polarization-corrected energy line; 'pcm' and 'vac' use standard line.
+          If 'auto', pick by sniffing the presence of the EFP line.
+    strict_env : if True and auto detection fails, raise; else fall back to 'pcm'.
+    config_min/config_max : optional inclusive range of configuration IDs to keep
+    """
+    paths = sorted(glob.glob(input_glob))
+    if not paths:
+        raise FileNotFoundError(f"No files match: {input_glob}")
+
+    rows: List[dict] = []
+    dropped_missing_cfg = 0
+    dropped_by_first_state = 0
+
+    for p in paths:
+        cfg = _extract_config_id(p)
+        if cfg is None:
+            logger.warning("Could not identify configuration number from %s; skipping.", p)
+            dropped_missing_cfg += 1
+            continue
+
+        if config_min is not None and cfg < config_min:
+            continue
+        if config_max is not None and cfg > config_max:
+            continue
+
+        with open(p, "r", errors="replace") as fh:
+            lines = fh.readlines()
+
+        # Decide env if auto
+        env_here = env
+        if env_here == "auto":
+            # If we ever see the EFP energy-with-pol-correction line in file, treat as EFP
+            if any(_EFP_ENERGY_RE.search(ln) for ln in lines):
+                env_here = "efp"
+            else:
+                env_here = "pcm"  # default fallback for non-EFP outputs
+                if strict_env:
+                    raise RuntimeError(f"Could not confirm 'efp' in {p}; strict_env=True and auto failed.")
+
+        energies, strengths = _parse_qchem_tddft_block(lines, env_here, max_states)
+        pairs = _pair_and_filter_first_state(energies, strengths, max_states, f1_min=f1_min)
+        if not pairs:
+            dropped_by_first_state += 1
+            continue
+
+        # pad to max_states
+        while len(pairs) < max_states:
+            pairs.append((0.0, 0.0))
+
+        row = {"Configuration": int(cfg)}
+        for i, (e, f) in enumerate(pairs, start=1):
+            row[f"Energy {i}"] = float(e)
+            row[f"Strength {i}"] = float(f)
         rows.append(row)
 
     if not rows:
-        return pd.DataFrame(columns=["Configuration"] +
-                            [f"Energy{i}" for i in range(1, max_states+1)] +
-                            [f"Strength{i}" for i in range(1, max_states+1)])
+        raise RuntimeError("No snapshots passed the first-state inclusion rule.")
+
+    if dropped_missing_cfg:
+        logger.warning("Skipped %d files due to missing config id.", dropped_missing_cfg)
+    if dropped_by_first_state:
+        logger.info("Excluded %d snapshots by first-state rule (E1>0 & f1>=%.3g).",
+                    dropped_by_first_state, f1_min)
 
     df = pd.DataFrame(rows).sort_values("Configuration").reset_index(drop=True)
     return df
-
-def to_wide_csv(df: pd.DataFrame, out_csv: str, max_states: int) -> None:
-    cols = ["Configuration"] + [f"Energy{i}" for i in range(1, max_states+1)] + [f"Strength{i}" for i in range(1, max_states+1)]
-    df = df.reindex(columns=cols, fill_value=0.0)
-    df.to_csv(out_csv, index=False)
