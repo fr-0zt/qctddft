@@ -6,9 +6,9 @@ from typing import Optional
 from pathlib import Path
 from . import logger, __version__
 from .extract import extract_directory
-from .spectra import build_normalized_spectrum
-from .io import write_spectrum_csv
-from .regions import identify_regions, plot_regions
+from .spectra import build_normalized_spectrum, write_spectrum_csv
+from .regions import identify_regions
+from .plots import plot_regions
 
 App = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -84,7 +84,7 @@ def spectrum_cmd(
     """
     Generates a convoluted spectrum from the extracted TDDFT data.
     """
-    out_path = output_csv or (str(Path(extracted_tsv).with_suffix("")) + "_spectrum-norm.csv")
+    out_path = output_csv or (str(Path(extracted_csv).with_suffix("")) + "_spectrum-norm.csv")
 
     x, y = build_normalized_spectrum(
         extracted_csv,

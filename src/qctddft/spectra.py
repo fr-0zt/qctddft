@@ -12,7 +12,7 @@ def _gaussian(x, e_i, f_wi, sigma_i):
     return factor * np.exp(-(alpha * (x - e_i)) ** 2)
 
 def build_normalized_spectrum(
-    extracted_tsv: str,
+    extracted_csv: str,
     sigma: float = 0.04,
     emin: float = 1.7,
     emax: float = 2.4,
@@ -27,7 +27,7 @@ def build_normalized_spectrum(
     Builds a normalized, broadened spectrum from the extracted TDDFT data.
 
     Args:
-        extracted_tsv: Path to the tab-separated file with the extracted data.
+        extracted_csv: Path to the tab-separated file with the extracted data.
         sigma: The broadening factor (FWHM) for the Gaussian functions.
         emin: The minimum energy for the spectrum.
         emax: The maximum energy for the spectrum.
