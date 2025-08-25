@@ -1,56 +1,106 @@
+# ==============================================================================
+# Project Build System Configuration
+# ==============================================================================
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# ==============================================================================
+# Core Project Metadata
+# ==============================================================================
 [project]
 name = "qctddft"
-version = "1.0.0"
-description = "Q-Chem TDDFT extraction, spectra, and region analysis"
+version = "1.2.0"
+description = "A Python toolkit for analyzing Q-Chem TDDFT calculations, from data extraction to structural clustering."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Senal Liyanage" }]
-dependencies = [
-  "typer>=0.9",
-  "pandas>=2.0",
-  "numpy>=1.23",
-  "matplotlib>=3.7",
-  "scipy>=1.10",  # keep if any module uses scipy.special.erf
-]
+authors = [{ name = "Senal Liyanage"}]
+
+# For more detailed classifiers: https://pypi.org/classifiers/
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
   "Topic :: Scientific/Engineering :: Chemistry",
-  "Intended Audience :: Science/Research"
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
 ]
 
-[project.scripts]
-qctddft = "qctddft.cli:run"
+# ==============================================================================
+# Project Dependencies
+# ==============================================================================
+dependencies = [
+  # --- Core ---
+  "numpy>=1.23",
+  "pandas>=2.0",
+  "scipy>=1.10",
 
-[project.urls]
-Homepage = "https://github.com/fr-0zt/"
-Repository = "https://github.com/fr-0zt/qctddft/"
+  # --- Command-Line Interface ---
+  "typer>=0.9",
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["qctddft*"]
+  # --- Plotting & Visualization ---
+  "matplotlib>=3.7",
 
-[tool.black]
-line-length = 100
+  # --- Scientific & Clustering ---
+  "MDAnalysis>=2.7.0",
+  "scikit-learn>=1.3.0",
+]
 
-[tool.ruff]
-line-length = 100
-select = ["E","F","I","UP"]
-
+# ==============================================================================
+# Optional Dependencies (for development, testing, etc.)
+# ==============================================================================
 [project.optional-dependencies]
 dev = [
+  # --- Testing ---
   "pytest>=7",
+
+  # --- Code Formatting & Linting ---
   "black>=23",
   "ruff>=0.4",
+
+  # --- Packaging & Distribution ---
   "build>=1.0",
   "twine>=4.0",
 ]
 
+# ==============================================================================
+# Entry Point for the Command-Line Script
+# ==============================================================================
+[project.scripts]
+qctddft = "qctddft.cli:run"
+
+# ==============================================================================
+# Project URLs (Homepage, Repository, etc.)
+# ==============================================================================
+[project.urls]
+Homepage = "https://github.com/fr-0zt/qctddft"
+Repository = "https://github.com/fr-0zt/qctddft"
+
+# ==============================================================================
+# Tool-Specific Configurations
+# ==============================================================================
+
+# --- Setuptools: How to find the package source code ---
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["qctddft*"]
+
+# --- Black: The uncompromising code formatter ---
+[tool.black]
+line-length = 100
+
+# --- Ruff: An extremely fast Python linter ---
+[tool.ruff]
+line-length = 100
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # isort (import sorting)
+    "UP", # pyupgrade
+]
+
+# --- Pytest: Configuration for running tests ---
 [tool.pytest.ini_options]
 testpaths = ["src/tests"]
 pythonpath = ["src"]

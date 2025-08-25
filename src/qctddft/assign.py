@@ -27,8 +27,9 @@ def assign_states_to_regions(
     config_col: str,
     regions: List[Region],
     sigma: float = 0.04,
-    states_mode: Literal["first", "all"] = "first",
+    states_mode: Literal["first", "all"] = "all",
     fractional: bool = False,
+    f_cutoff: float = 0.1,  # <-- New parameter
     save: bool = True,
     list_excluded: bool = False,
     table_path: str | None = None,
@@ -38,15 +39,10 @@ def assign_states_to_regions(
 
     - Hard: a state belongs to the single region whose span [L,R] contains Ei (ties → left).
     - Fractional: a state contributes to all regions with Gaussian overlap weight.
-
-    Outputs
-    -------
-    - state_assignment.csv
-    - region_summary.csv
     """
     cfg = df[config_col].to_numpy(int)
-    E = df[energy_cols].to_numpy(float)          # shape (N, S)
-    F = df[strength_cols].to_numpy(float)        # shape (N, S)
+    E = df[energy_cols].to_numpy(float)
+    F = df[strength_cols].to_numpy(float)
 
     if states_mode == "first":
         E = E[:, :1]
@@ -55,11 +51,9 @@ def assign_states_to_regions(
     N, S = E.shape
     Rn = len(regions)
 
-    # Build weights W of shape (N*S, R)
     Ei = E.reshape(-1)
     fi = F.reshape(-1)
 
-    # build region span arrays
     span_L = np.array([r.left_energy for r in regions], dtype=float)
     span_R = np.array([r.right_energy for r in regions], dtype=float)
 
@@ -68,38 +62,37 @@ def assign_states_to_regions(
         for j in range(Rn):
             wj = _gauss_region_weight(Ei, sigma, span_L[j], span_R[j])
             W[:, j] = np.clip(wj, 0.0, 1.0)
-        # normalize per-state so sum_j W_ij ≤ 1 (Gaussian tails outside all regions are discarded)
         sums = W.sum(axis=1, keepdims=True)
         nz = sums[:, 0] > 0
         W[nz, :] = W[nz, :] / sums[nz]
-    else:
-        # Hard assignment
+    else: # Hard assignment
         centers = 0.5 * (span_L + span_R)
-        # choose region whose [L,R] contains Ei, else closest center
         W = np.zeros((Ei.size, Rn), dtype=float)
         for i, e in enumerate(Ei):
             hits = np.where((e >= span_L) & (e <= span_R))[0]
             if hits.size:
-                # if multiple, choose the left-most deterministically
                 j = int(hits[0])
             else:
                 j = int(np.argmin(np.abs(centers - e)))
             W[i, j] = 1.0
 
-    # rows for assignment table
     rows = []
     for idx in range(Ei.size):
-        if fi[idx] <= 0:
+        # --- New filtering logic ---
+        # Skip any state whose oscillator strength is below the cutoff.
+        if fi[idx] < f_cutoff:
             continue
+        # --- End of new logic ---
+
         nnz = np.where(W[idx] > 1e-12)[0]
         if nnz.size == 0:
             continue
+        
         n = idx // S
         s = (idx % S) + 1
         for j in nnz:
             w = float(W[idx, j])
-            if w <= 0:
-                continue
+            if w <= 0: continue
             rows.append({
                 "Configuration": int(cfg[n]),
                 "state": int(s),
@@ -110,9 +103,12 @@ def assign_states_to_regions(
                 "fi_weighted": float(fi[idx] * w),
             })
 
+    if not rows:
+        logger.warning(f"No states passed the f_cutoff threshold of {f_cutoff}. No assignment file will be written.")
+        return {"assignments": pd.DataFrame(), "summary": pd.DataFrame()}
+
     assign_df = pd.DataFrame(rows).sort_values(["region", "Configuration", "state"]).reset_index(drop=True)
 
-    # Region summary
     summary_rows = []
     for j, r in enumerate(regions, start=1):
         sub = assign_df[assign_df["region"] == j]
@@ -142,20 +138,13 @@ def assign_states_to_regions(
             })
     summary_df = pd.DataFrame(summary_rows)
 
-    # Save
     if save and table_path:
         base = Path(table_path).with_suffix("")
         assign_csv = f"{base.name}_state_assignment.csv"
         summary_csv = f"{base.name}_region_summary.csv"
-        assign_df.to_csv(assign_csv, index=False)
-        summary_df.to_csv(summary_csv, index=False)
+        assign_df.to_csv(assign_csv, index=False, float_format="%.5f")
+        summary_df.to_csv(summary_csv, index=False, float_format="%.5f")
         logger.info(f"Wrote {assign_csv}")
         logger.info(f"Wrote {summary_csv}")
-
-    # Excluded list: leave to extractor (we maintain all qualifying snapshots here)
-    if list_excluded and table_path:
-        ex_path = f"{Path(table_path).with_suffix('').name}_excluded_configurations.txt"
-        Path(ex_path).write_text("")  # placeholder; extraction already lists excluded
-        logger.info(f"Wrote excluded configuration IDs → {ex_path}")
 
     return {"assignments": assign_df, "summary": summary_df}

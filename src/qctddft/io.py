@@ -2,15 +2,59 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Tuple
-
+from typing import List, Tuple, Dict
 import numpy as np
 import pandas as pd
 from . import logger
+from .regions import Region # Import the Region class
 
 # -------------------------
 # Generic readers/writers
 # -------------------------
+
+def write_regions_csv(out_csv: str, regions: List[Region]) -> None:
+    """Saves identified spectral regions to a CSV file."""
+    if not regions:
+        logger.warning("No regions were provided to save.")
+        return
+    
+    # Convert list of dataclasses to a list of dicts for DataFrame creation
+    region_data = [
+        {
+            "region_id": i + 1,
+            "left_energy_ev": r.left_energy,
+            "right_energy_ev": r.right_energy,
+            "peak_energy_ev": r.peak_energy,
+            "peak_intensity": r.peak_intensity,
+            "width_ev": r.right_energy - r.left_energy,
+        }
+        for i, r in enumerate(regions)
+    ]
+    
+    df = pd.DataFrame(region_data)
+    df.to_csv(out_csv, index=False, float_format="%.5f")
+    logger.info(f"Saved {len(regions)} regions to {out_csv}")
+
+def read_regions_csv(path: str) -> List[Region]:
+    """Reads a regions CSV file and reconstructs a list of Region objects."""
+    df = pd.read_csv(path)
+    regions = []
+    # The indices (left_idx, etc.) aren't needed for the assignment logic,
+    # so we can use placeholder values (0).
+    for row in df.itertuples():
+        regions.append(
+            Region(
+                left_idx=0,
+                right_idx=0,
+                left_energy=row.left_energy_ev,
+                right_energy=row.right_energy_ev,
+                peak_idx=0,
+                peak_energy=row.peak_energy_ev,
+                peak_intensity=row.peak_intensity,
+            )
+        )
+    return regions
+    
 def read_spectrum_csv(path: str) -> Tuple[np.ndarray, np.ndarray]:
     """Read spectrum CSV with columns like 'Energy (eV)', 'Intensity' (case-insensitive)."""
     df = pd.read_csv(path)
