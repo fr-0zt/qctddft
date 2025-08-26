@@ -140,9 +140,22 @@ def cluster_structures(
     logger.info("Identifying and saving representative structures for each cluster.")
     for i in range(n_clusters):
         cluster_indices = np.where(labels == i)[0]
+        logger.info(f"Cluster {i+1} has {len(cluster_indices)} members.") # Your previous change
+        
         if len(cluster_indices) == 0:
             logger.warning(f"Cluster {i+1} is empty. Skipping.")
             continue
+        
+        # --- Add these lines to save cluster members ---
+        cluster_config_ids = [loaded_configs[idx] for idx in cluster_indices]
+        out_members_path = output_path_obj / f"region_{region_id}_cluster_{i+1}_members.txt"
+        with open(out_members_path, 'w') as f:
+            f.write(f"# Members of Cluster {i+1} for Region {region_id}\n")
+            f.write(f"# Total members: {len(cluster_config_ids)}\n")
+            for config_id in sorted(cluster_config_ids):
+                f.write(f"{config_id}\n")
+        logger.info(f"Saved member list for cluster {i+1} -> {out_members_path.name}")
+        # --- End of new code ---
         
         # Find the structure closest to the center (centroid)
         if method == "kmeans":
