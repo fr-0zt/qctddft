@@ -12,7 +12,7 @@ def test_package_version_is_available():
     assert version("qctddft")
 
 
-def test_cli_reports_version():
-    result = runner.invoke(App, ["--version"])
+def test_cli_shows_help():
+    result = runner.invoke(App, ["--help"])
     assert result.exit_code == 0
-    assert "qctddft" in result.stdout
+    assert "Usage" in result.stdout
