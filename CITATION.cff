@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use qctddft in published work, please cite the repository and version used."
+title: "qctddft"
+version: "1.2.0"
+type: software
+authors:
+  - family-names: "Liyanage"
+    given-names: "Senal"
+license: MIT
+repository-code: "https://github.com/fr-0zt/qctddft"
+url: "https://github.com/fr-0zt/qctddft"
+abstract: >-
+  qctddft is a command-line toolkit for post-processing Q-Chem TDDFT calculations,
+  including extraction of excitation data, spectrum generation, spectral-region
+  identification, state assignment, and clustering of representative structures.
+keywords:
+  - computational chemistry
+  - TDDFT
+  - Q-Chem
+  - excited states
+  - spectroscopy
+  - molecular modeling
